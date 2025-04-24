@@ -1,0 +1,162 @@
+import gymnasium as gym
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+class TurtleBotEnv(gym.Env):
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "render.modes": ["human", "rgb_array"],
+        "render_fps": 30,
+    }
+
+    def __init__(self, render_mode=None, car="default", brt="default", return_goal=False):
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.fig, self.ax = plt.subplots(figsize=(5, 5))
+        self.render_mode = render_mode
+        path = os.path.abspath(__file__)
+        dir_path = os.path.dirname(path)
+
+
+        self.state = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.dt = 0.05
+
+        self.action_space = gym.spaces.Box(
+            low=np.array([-self.car.wMax], dtype=np.float32),
+            high=np.array([self.car.wMax], dtype=np.float32),
+            dtype=np.float32,
+        )
+
+        self.return_goal = return_goal
+        if self.return_goal:
+            self.observation_space = gym.spaces.Box(
+                low=np.array([-4, -4, -1.0, -1.0, -4, -4], dtype=np.float32),
+                high=np.array([4, 4, 1.0, 1.0, 4, 4], dtype=np.float32),
+                dtype=np.float32,
+            )
+        else:
+            self.observation_space = gym.spaces.Box(
+                low=np.array([-4, -4, -1.0, -1.0], dtype=np.float32),
+                high=np.array([4, 4, 1.0, 1.0], dtype=np.float32),
+                dtype=np.float32,
+            )
+
+        self.goal_location = np.array([2.0, 2.0], dtype=np.float32)
+        self.goal_r = goal_r
+        self.obstacle_location = np.array([0.0, 0.0], dtype=np.float32)
+        self.obstacle_r = obstacle_r
+
+        if brt == "default":
+            print("brt: turtle_bot")
+            self.brt = np.load(
+                os.path.join(dir_path, f"../brts/static_obstacle_dubins_3d_brt_car_turtle_bot.npy")
+            )
+        elif brt == "v1":
+            print("brt v1")
+            self.brt = np.load(
+                os.path.join(
+                    dir_path, f"../brts/static_obstacle_dubins_3d_brt_car_1.npy"
+                )
+            )
+        elif brt == "v2":
+            print("brt v2")
+            self.brt = np.load(
+                os.path.join(
+                    dir_path, f"../brts/static_obstacle_dubins_3d_brt_car_2.npy"
+                )
+            )
+
+        self.grid = grid
+
+    def reset(self, seed=None, options={}):
+        self.state = np.array([-2.0, -2.0, np.pi / 4], dtype=np.float32)
+
+        if self.render_mode == "human":
+            self._render_frame()
+
+        return self._get_obs(), {"cost": 0}
+
+    def step(self, action):
+        self.state = (
+            self.car.dynamics_non_hcl(0, self.state, action) * self.dt + self.state
+        )
+        self.state[2] = normalize_angle(self.state[2])
+
+        info = {}
+
+        obs = self._get_obs()
+        reward = -np.linalg.norm(self.state[:2] - self.goal_location)
+        cost = np.linalg.norm(self.state[:2] - self.obstacle_location) < (
+            self.obstacle_r + self.car.r
+        )
+        terminated = np.linalg.norm(self.state[:2] - self.goal_location) < (
+            self.goal_r + self.car.r
+        )
+
+        info["cost"] = cost
+
+        return obs, reward, terminated, False, info
+
+    def _get_obs(self):
+        if self.return_goal:
+            return np.array(
+                [self.state[0], self.state[1], np.cos(self.state[2]), np.sin(self.state[2]), self.goal_location[0], self.goal_location[1]]
+            )
+        else:
+            return np.array(
+                [self.state[0], self.state[1], np.cos(self.state[2]), np.sin(self.state[2])]
+            )
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return self._render_frame()
+        self._render_frame()
+        self.fig.canvas.flush_events()
+        plt.pause(1 / self.metadata["render_fps"])
+
+    def _render_frame(self):
+
+        self.ax.clear()
+
+        def add_circle(state, r, color="green"):
+            self.ax.add_patch(plt.Circle(state[:2], radius=r, color=color))
+
+            dir = state[:2] + r * np.array([np.cos(state[2]), np.sin(state[2])])
+
+            self.ax.plot([state[0], dir[0]], [state[1], dir[1]], color="c")
+
+        add_circle(self.state, self.car.r, color="blue")
+        goal = plt.Circle(self.goal_location[:2], radius=self.goal_r, color="g")
+        self.ax.add_patch(goal)
+        obstacle = plt.Circle(self.obstacle_location, radius=self.obstacle_r, color="r")
+        self.ax.add_patch(obstacle)
+
+        X, Y = np.meshgrid(
+            np.linspace(self.grid.min[0], self.grid.max[0], self.grid.pts_each_dim[0]),
+            np.linspace(self.grid.min[1], self.grid.max[1], self.grid.pts_each_dim[1]),
+            indexing="ij",
+        )
+
+        index = self.grid.get_index(self.state)
+
+        self.ax.contour(
+            X,
+            Y,
+            self.true_brt[:, :, index[2]],
+            levels=[0.1],
+        )
+        self.ax.set_xlim(-5, 5)
+        self.ax.set_ylim(-5, 5)
+        self.ax.set_aspect("equal")
+        self.ax.set_xlabel("x")
+        self.ax.set_ylabel("y")
+        self.ax.autoscale_view()
+
+        self.fig.canvas.draw()
+        img = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(self.fig.canvas.get_width_height()[::-1] + (3,))
+
+        return img
+
+    def close(self):
+        plt.close()
